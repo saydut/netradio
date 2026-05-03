@@ -5,6 +5,20 @@ import os
 import signal
 import atexit
 from youtubesearchpython import VideosSearch
+from youtubesearchpython.core import requests as _ysp_req
+import httpx as _httpx
+from youtubesearchpython.core.constants import userAgent as _ua
+
+def _p(self):
+    p = self.proxy.get("https://") or self.proxy.get("http://")
+    return _httpx.post(self.url, headers={"User-Agent": _ua}, json=self.data, timeout=self.timeout, proxy=p)
+
+def _g(self):
+    p = self.proxy.get("https://") or self.proxy.get("http://")
+    return _httpx.get(self.url, headers={"User-Agent": _ua}, timeout=self.timeout, cookies={"CONSENT": "YES+1"}, proxy=p)
+
+_ysp_req.RequestCore.syncPostRequest = _p
+_ysp_req.RequestCore.syncGetRequest = _g
 
 RADIO_STATIONS = [
     ("KRAL Pop", "http://46.20.3.201:80/;"),
