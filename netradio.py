@@ -1,14 +1,24 @@
 #!/usr/bin/env python
-import curses
-import subprocess
+import asyncio
+import json
 import os
 import signal
-import atexit
+import subprocess
+import tomllib
+from pathlib import Path
+
+from textual import work
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Vertical
+from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, Static, TabbedContent, TabPane
+
 from youtubesearchpython import VideosSearch
 from youtubesearchpython.core import requests as _ysp_req
 import httpx as _httpx
 from youtubesearchpython.core.constants import userAgent as _ua
 
+# httpx 0.28+ uyumluluk yaması
 def _p(self):
     p = self.proxy.get("https://") or self.proxy.get("http://")
     return _httpx.post(self.url, headers={"User-Agent": _ua}, json=self.data, timeout=self.timeout, proxy=p)
@@ -20,150 +30,216 @@ def _g(self):
 _ysp_req.RequestCore.syncPostRequest = _p
 _ysp_req.RequestCore.syncGetRequest = _g
 
-RADIO_STATIONS = [
-    ("KRAL Pop", "http://46.20.3.201:80/;"),
-    ("Power Türk", "https://live.powerapp.com.tr/powerturk/abr/playlist.m3u8"),
-    ("Alem", "https://turkmedya.radyotvonline.com/turkmedya/alemfm.stream/playlist.m3u8"),
-    ("Joy", "http://provisioning.streamtheworld.com/pls/JOY_FMAAC.pls"),
-    ("Power", "http://icast.powergroup.com.tr/PowerTurk/mpeg/128/home"),
-    ("Slow Turk", "https://radyo.duhnet.tv/slowturk"),
-    ("Pal", "http://shoutcast.radyogrup.com:1030/;"),
-    ("Powerturk", "http://mpegpowerturk.listenpowerapp.com/powerturk/mpeg/icecast.audio")
-]
+MPV_SOCKET = "/tmp/netradio-mpv.sock"
+CONFIG_PATH = Path.home() / ".config" / "netradio" / "stations.toml"
+
+DEFAULT_STATIONS = """\
+[[stations]]
+name = "KRAL Pop"
+url = "http://46.20.3.201:80/;"
+
+[[stations]]
+name = "Power Türk"
+url = "https://live.powerapp.com.tr/powerturk/abr/playlist.m3u8"
+
+[[stations]]
+name = "Alem"
+url = "https://turkmedya.radyotvonline.com/turkmedya/alemfm.stream/playlist.m3u8"
+
+[[stations]]
+name = "Joy"
+url = "http://provisioning.streamtheworld.com/pls/JOY_FMAAC.pls"
+
+[[stations]]
+name = "Power"
+url = "http://icast.powergroup.com.tr/PowerTurk/mpeg/128/home"
+
+[[stations]]
+name = "Slow Türk"
+url = "https://radyo.duhnet.tv/slowturk"
+
+[[stations]]
+name = "Pal"
+url = "http://shoutcast.radyogrup.com:1030/;"
+
+[[stations]]
+name = "Powerturk"
+url = "http://mpegpowerturk.listenpowerapp.com/powerturk/mpeg/icecast.audio"
+"""
+
+def load_stations():
+    if not CONFIG_PATH.exists():
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_PATH.write_text(DEFAULT_STATIONS)
+    with open(CONFIG_PATH, "rb") as f:
+        data = tomllib.load(f)
+    return [(s["name"], s["url"]) for s in data.get("stations", [])]
 
 mpv_process = None
 
-def search_youtube(term):
-    videos_search = VideosSearch(term, limit=10)
-    results = videos_search.result()["result"]
-    return [(result["title"], result["link"]) for result in results]
-
-def play_media(url, media_type, quality):
-    global mpv_process
-    
-    if media_type == "audio":
-        format_option = "bestaudio"
-        audio_quality = {"1": "0", "2": "5", "3": "9"}.get(quality, "5")
-        command = f'yt-dlp -f {format_option} --audio-quality {audio_quality} -o - {url} | mpv -'
-    elif media_type == "video":
-        if quality == "1":
-            command = f'mpv {url}'
-        else:
-            format_option = "best" if quality == "2" else "worst"
-            command = f'yt-dlp -f {format_option} -o - {url} | mpv -'
-    
-    if mpv_process:
-        mpv_process.terminate()
-        mpv_process.wait()  # Ensure the previous process has ended
-    
-    mpv_process = subprocess.Popen(command, shell=True, preexec_fn=os.setsid)
-
-def download_media(video_url, media_type, quality):
-    if media_type == "audio":
-        format_option = "bestaudio"
-        audio_quality = {"1": "0", "2": "5", "3": "9"}.get(quality, "5")
-        command = ['yt-dlp', '-f', format_option, '--audio-quality', audio_quality, '-o', '%(title)s.%(ext)s', video_url]
-    elif media_type == "video":
-        format_option = {"1": "bestvideo+bestaudio", "2": "worstvideo+bestaudio", "3": "worstvideo+worstaudio"}.get(quality, "worstvideo+bestaudio")
-        command = ['yt-dlp', '-f', format_option, '-o', '%(title)s.%(ext)s', video_url]
-    
-    subprocess.run(command)
-
-def cleanup():
+def _kill_mpv():
     global mpv_process
     if mpv_process:
-        os.killpg(os.getpgid(mpv_process.pid), signal.SIGTERM)
-        mpv_process.wait()  # Ensure the process has ended
+        try:
+            os.killpg(os.getpgid(mpv_process.pid), signal.SIGTERM)
+            mpv_process.wait()
+        except Exception:
+            pass
+        mpv_process = None
 
-def draw_menu(stdscr, selected_row_idx, menu_items):
-    stdscr.clear()
-    h, w = stdscr.getmaxyx()
-    
-    for idx, row in enumerate(menu_items):
-        x = w//2 - len(row)//2
-        y = h//2 - len(menu_items)//2 + idx
-        if idx == selected_row_idx:
-            stdscr.attron(curses.color_pair(1))
-            stdscr.addstr(y, x, row)
-            stdscr.attroff(curses.color_pair(1))
-        else:
-            stdscr.addstr(y, x, row)
-    
-    stdscr.refresh()
-
-def menu(stdscr, menu_items):
-    curses.curs_set(0)
-    curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_WHITE)
-
-    current_row = 0
-    draw_menu(stdscr, current_row, menu_items)
-
+def play_radio(url: str):
     global mpv_process
+    _kill_mpv()
+    cmd = f"mpv --input-ipc-server={MPV_SOCKET} --no-video {url}"
+    mpv_process = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    while True:
-        key = stdscr.getch()
+def play_youtube(url: str):
+    global mpv_process
+    _kill_mpv()
+    cmd = f"yt-dlp -f bestaudio -o - {url} | mpv --input-ipc-server={MPV_SOCKET} --no-video -"
+    mpv_process = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        if key == curses.KEY_UP and current_row > 0:
-            current_row -= 1
-        elif key == curses.KEY_DOWN and current_row < len(menu_items) - 1:
-            current_row += 1
-        elif key == curses.KEY_ENTER or key in [10, 13]:
-            return current_row
-        elif key == ord('q'):
-            if mpv_process:
-                os.killpg(os.getpgid(mpv_process.pid), signal.SIGTERM)
-                mpv_process = None
-            return None
-        
-        draw_menu(stdscr, current_row, menu_items)
+async def get_mpv_title() -> str:
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_unix_connection(MPV_SOCKET), timeout=1.0
+        )
+        writer.write((json.dumps({"command": ["get_property", "media-title"]}) + "\n").encode())
+        await writer.drain()
+        line = await asyncio.wait_for(reader.readline(), timeout=1.0)
+        writer.close()
+        await writer.wait_closed()
+        return json.loads(line).get("data") or ""
+    except Exception:
+        return ""
 
-def main(stdscr):
-    atexit.register(cleanup)
 
-    while True:
-        main_menu = ["1) İnternet Radyosu", "2) YouTube Podcast", "3) Çıkış"]
-        selected_option = menu(stdscr, main_menu)
-        
-        if selected_option is None:
-            continue
-        
-        if selected_option == 0:
-            radio_menu = [station[0] for station in RADIO_STATIONS]
-            selected_station = menu(stdscr, radio_menu)
-            if selected_station != -1:
-                play_media(RADIO_STATIONS[selected_station][1], "audio", "1")
-        
-        elif selected_option == 1:
-            stdscr.clear()
-            curses.echo()
-            stdscr.addstr(0, 0, "Aranacak kanal veya terimi girin: ")
-            term = stdscr.getstr().decode("utf-8")
-            curses.noecho()
+class NowPlaying(Static):
+    def on_mount(self):
+        self.set_interval(2, self.refresh_title)
 
-            results = search_youtube(term)
-            podcast_menu = [result[0] for result in results]
-            selected_podcast = menu(stdscr, podcast_menu)
-            
-            if selected_podcast != -1:
-                video_url = results[selected_podcast][1]
-                action_menu = ["1) Oynat (ses)", "2) Oynat (video)", "3) İndir (ses)", "4) İndir (video)"]
-                selected_action = menu(stdscr, action_menu)
-                
-                if selected_action != -1:
-                    quality_menu = ["1) Yüksek", "2) Orta", "3) Düşük"]
-                    selected_quality = menu(stdscr, quality_menu) + 1
-                    
-                    if selected_action == 0:
-                        play_media(video_url, "audio", str(selected_quality))
-                    elif selected_action == 1:
-                        play_media(video_url, "video", str(selected_quality))
-                    elif selected_action == 2:
-                        download_media(video_url, "audio", str(selected_quality))
-                    elif selected_action == 3:
-                        download_media(video_url, "video", str(selected_quality))
-        
-        elif selected_option == 2:
-            break
+    async def refresh_title(self):
+        title = await get_mpv_title()
+        if title:
+            self.update(f"♪  {title}")
+        elif mpv_process and mpv_process.poll() is None:
+            self.update("♪  Yükleniyor...")
+        else:
+            self.update("♪  —")
+
+
+class NetRadioApp(App):
+    CSS = """
+    Screen { background: $surface; }
+
+    TabbedContent { height: 1fr; }
+
+    ListView {
+        height: 1fr;
+        border: tall $primary;
+    }
+
+    ListView > ListItem { padding: 0 2; }
+
+    Input { margin: 1 0; }
+
+    #search-status {
+        height: 1;
+        color: $text-muted;
+        padding: 0 1;
+    }
+
+    NowPlaying {
+        background: $primary-darken-2;
+        color: $text;
+        padding: 0 2;
+        height: 1;
+        dock: bottom;
+    }
+    """
+
+    BINDINGS = [
+        Binding("s", "stop", "Durdur"),
+        Binding("q", "quit", "Çıkış"),
+    ]
+
+    def __init__(self):
+        super().__init__()
+        self.stations = load_stations()
+        self.search_results: list[tuple[str, str]] = []
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        with TabbedContent():
+            with TabPane("📻 Radyo", id="radio-tab"):
+                yield ListView(
+                    *[ListItem(Label(name)) for name, _ in self.stations],
+                    id="station-list",
+                )
+            with TabPane("🎵 YouTube", id="youtube-tab"):
+                with Vertical():
+                    yield Input(placeholder="Ara ve Enter'a bas...", id="search-input")
+                    yield Label("", id="search-status")
+                    yield ListView(id="result-list")
+        yield NowPlaying("♪  —")
+        yield Footer()
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        idx = event.list_view.index
+        if idx is None:
+            return
+        if event.list_view.id == "station-list":
+            name, url = self.stations[idx]
+            self.query_one(NowPlaying).update(f"♪  {name} yükleniyor...")
+            self.run_worker(lambda u=url: play_radio(u), thread=True, exclusive=True)
+        elif event.list_view.id == "result-list" and self.search_results:
+            title, url = self.search_results[idx]
+            self.query_one(NowPlaying).update(f"♪  {title} yükleniyor...")
+            self.run_worker(lambda u=url: play_youtube(u), thread=True, exclusive=True)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        term = event.value.strip()
+        if term:
+            self._do_search(term)
+
+    @work(thread=True)
+    def _do_search(self, term: str) -> None:
+        self.call_from_thread(
+            self.query_one("#search-status", Label).update,
+            f"🔍  '{term}' aranıyor...",
+        )
+        try:
+            results = VideosSearch(term, limit=10).result()["result"]
+            self.search_results = [(r["title"], r["link"]) for r in results]
+            self.call_from_thread(self._populate_results)
+        except Exception as e:
+            self.call_from_thread(
+                self.query_one("#search-status", Label).update,
+                f"Hata: {e}",
+            )
+
+    def _populate_results(self) -> None:
+        lv = self.query_one("#result-list", ListView)
+        lv.clear()
+        for title, _ in self.search_results:
+            lv.append(ListItem(Label(title)))
+        self.query_one("#search-status", Label).update(
+            f"{len(self.search_results)} sonuç bulundu"
+        )
+
+    def action_stop(self) -> None:
+        _kill_mpv()
+        self.query_one(NowPlaying).update("♪  —")
+
+    def action_quit(self) -> None:
+        _kill_mpv()
+        self.exit()
+
+    def on_unmount(self) -> None:
+        _kill_mpv()
+
 
 if __name__ == "__main__":
-    curses.wrapper(main)
+    NetRadioApp().run()
