@@ -1,0 +1,13 @@
+# makepkg artefaktları
+pkg/
+src/
+netradio/
+*.pkg.tar.zst
+*.pkg.tar.xz
+
+# yerel notlar
+komutlar.txt
+
+# python
+__pycache__/
+*.pyc

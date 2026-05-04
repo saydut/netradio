@@ -11,6 +11,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
+from textual.screen import ModalScreen
 from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, Static, TabbedContent, TabPane
 
 from youtubesearchpython import VideosSearch
@@ -94,12 +95,23 @@ def play_radio(url: str):
     mpv_process = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-def play_youtube(url: str):
+YOUTUBE_FORMATS = [
+    ("Sadece ses (en iyi)", ["--no-video", "--ytdl-format=bestaudio"]),
+    ("Video — en iyi", []),
+    ("Video — 1080p", ["--ytdl-format=bestvideo[height<=1080]+bestaudio/best[height<=1080]"]),
+    ("Video — 720p", ["--ytdl-format=bestvideo[height<=720]+bestaudio/best[height<=720]"]),
+    ("Video — 480p", ["--ytdl-format=bestvideo[height<=480]+bestaudio/best[height<=480]"]),
+    ("Video — 360p", ["--ytdl-format=bestvideo[height<=360]+bestaudio/best[height<=360]"]),
+]
+
+def play_youtube(url: str, extra_args: list[str]):
     global mpv_process
     _kill_mpv()
-    cmd = f"yt-dlp -f bestaudio -o - {url} | mpv --input-ipc-server={MPV_SOCKET} --no-video -"
-    mpv_process = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    mpv_process = subprocess.Popen(
+        ["mpv", f"--input-ipc-server={MPV_SOCKET}", *extra_args, url],
+        preexec_fn=os.setsid,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
 
 async def get_mpv_title() -> str:
     try:
@@ -114,6 +126,38 @@ async def get_mpv_title() -> str:
         return json.loads(line).get("data") or ""
     except Exception:
         return ""
+
+
+class FormatPicker(ModalScreen[int]):
+    BINDINGS = [Binding("escape", "dismiss(None)", "İptal")]
+
+    DEFAULT_CSS = """
+    FormatPicker {
+        align: center middle;
+    }
+    FormatPicker > Vertical {
+        background: $surface;
+        border: tall $primary;
+        padding: 1 2;
+        width: 50;
+        height: auto;
+    }
+    FormatPicker ListView {
+        height: auto;
+        border: none;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("Format seçin:")
+            yield ListView(
+                *[ListItem(Label(name)) for name, _ in YOUTUBE_FORMATS],
+                id="format-list",
+            )
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        self.dismiss(event.list_view.index)
 
 
 class NowPlaying(Static):
@@ -196,8 +240,13 @@ class NetRadioApp(App):
             self.run_worker(lambda u=url: play_radio(u), thread=True, exclusive=True)
         elif event.list_view.id == "result-list" and self.search_results:
             title, url = self.search_results[idx]
-            self.query_one(NowPlaying).update(f"♪  {title} yükleniyor...")
-            self.run_worker(lambda u=url: play_youtube(u), thread=True, exclusive=True)
+            def _on_pick(fmt_idx: int | None) -> None:
+                if fmt_idx is None:
+                    return
+                _, args = YOUTUBE_FORMATS[fmt_idx]
+                self.query_one(NowPlaying).update(f"♪  {title} yükleniyor...")
+                self.run_worker(lambda u=url, a=args: play_youtube(u, a), thread=True, exclusive=True)
+            self.push_screen(FormatPicker(), _on_pick)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         term = event.value.strip()
