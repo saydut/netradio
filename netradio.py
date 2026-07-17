@@ -530,7 +530,7 @@ class FatProgress(Static):
         # bar genişliği = pencere - padding - prefix/suffix uzunluğu
         total_w = max(20, self.size.width - 4)  # 4 = horizontal padding
         text_w = len(time_l) + len(time_r) + 4
-        bar_w = max(10, total_w - text_w)
+        bar_w = max(20, total_w - text_w)
         ratio = max(0.0, min(1.0, self._pos / self._dur))
         filled = int(bar_w * ratio)
         bar = "█" * filled + "░" * (bar_w - filled)
@@ -822,7 +822,7 @@ class NetRadioApp(App):
             f"🔍  '{term}' aranıyor...",
         )
         try:
-            results = VideosSearch(term, limit=10).result()["result"]
+            results = VideosSearch(term, limit=20).result()["result"]
             self.search_results = [
                 (str(title), str(link))
                 for r in results
